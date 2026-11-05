@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Great Gnome Hunt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;700&family=Nunito:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --night:#14261c; --moss:#1d3a2a; --fern:#3f7a52; --mint:#e4efe0; --gold:#f2c14e; --cap:#d23a2c;
+    --pixel:"Pixelify Sans", ui-monospace, monospace; --body:"Nunito", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--night); color:var(--mint); font:18px/1.55 var(--body); }
+  main { max-width:800px; margin:0 auto; padding:28px 16px 56px; }
+  h1 { font:700 clamp(2rem,7vw,3.2rem)/1.1 var(--pixel); margin:0 0 10px; }
+  p { margin:0 0 16px; max-width:60ch; }
+  .hud { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin:0 0 12px; }
+  #count { font:700 1.25rem var(--pixel); }
+  .slots { display:flex; gap:6px; }
+  .slot { width:48px; height:64px; image-rendering:pixelated; opacity:.35; filter:brightness(0); transition:opacity .3s; }
+  .slot.on { opacity:1; filter:none; }
+  .btns { margin-left:auto; display:flex; gap:8px; }
+  button { font:700 15px var(--body); color:var(--mint); background:var(--moss); border:2px solid var(--fern);
+    border-radius:8px; padding:6px 14px; cursor:pointer; }
+  button:hover { border-color:var(--gold); }
+  button:focus-visible { outline:3px solid var(--gold); outline-offset:2px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .stage { border:4px solid var(--fern); border-radius:6px; background:#2c5a3d; line-height:0; }
+  #world { width:100%; aspect-ratio:4/3; display:block; image-rendering:pixelated; cursor:zoom-in; touch-action:manipulation; }
+  .note { font-size:15px; opacity:.7; margin-top:14px; }
+  .prize { position:fixed; inset:0; z-index:20; display:none; place-items:center; padding:20px; background:rgba(10,25,17,.88); }
+  .prize.show { display:grid; }
+  .prize div { max-width:420px; text-align:center; padding:32px 26px; border-radius:16px; background:var(--cap);
+    color:#fff; border:4px solid var(--gold); }
+  .prize h2 { font:700 1.8rem var(--pixel); margin:0 0 8px; }
+  .prize p { margin:0 auto 8px; }
+  .word { font:700 2.4rem/1.2 var(--pixel); letter-spacing:.05em; color:var(--gold); margin:14px 0; }
+  .prize button { background:var(--gold); color:#3a1a00; border-color:var(--gold); border-radius:99px; padding:8px 22px; margin-top:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>The Great Gnome Hunt</h1>
+  <p>Five gnomes are hiding in this forest, and they do not stay put. Click each one you spot. Find all five to get the secret codeword.</p>
+
+  <div class="hud">
+    <span id="count" role="status" aria-live="polite">0 / 5 found</span>
+    <div class="slots" id="slots"></div>
+    <div class="btns">
+      <button type="button" id="hint">Hint</button>
+      <button type="button" id="reset">Start over</button>
+    </div>
+  </div>
+
+  <div class="stage"><canvas id="world" aria-label="A forest scene with hidden gnomes. Click a gnome to find it. Use the Hint button if you are stuck."></canvas></div>
+  <p class="note">Tip: watch for movement. Gnomes sneak between hiding spots every so often.</p>
+</main>
+
+<div class="prize" id="prize" role="dialog" aria-modal="true" aria-labelledby="prize-title">
+  <div>
+    <h2 id="prize-title">You found all five!</h2>
+    <p>Your secret codeword is</p>
+    <div class="word" id="word"></div>
+    <p>Reply to the email with it to claim your prize.</p>
+    <button type="button" id="close">Back to the forest</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  // CHANGE THIS: run btoa('YOURWORD') in the browser console and paste the result here.
+  // This one decodes to TOADSTOOL. It hides the word from casual view, not from determined people.
+  var CODE = "VE9BRFNUT09M";
+  var KEY = "gnome-hunt-v2";
+  var W = 256, H = 192;
+  var NAMES = ["f-red_hat", "m-green_hat", "f-violet_hat", "m-red_hat", "f-green_hat"];
+  var calm = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var cv = document.getElementById("world"), ctx = cv.getContext("2d");
+  cv.width = W; cv.height = H; ctx.imageSmoothingEnabled = false;
+
+  // Forest tileset rectangles: [sx, sy, w, h, hideOffset]. hideOffset 0 = decoration only.
+  var S = {
+    round:[64,0,32,32,11], tall:[128,0,32,64,3], pine:[192,0,32,64,3],
+    logA:[0,32,16,16,3], logB:[32,32,16,16,3], stump:[16,48,16,16,3],
+    rockA:[0,64,16,16,3], pebbles:[32,64,16,16,0], rockB:[16,80,16,16,3], rockC:[48,80,16,16,3],
+    bushD:[0,96,16,16,3], fern:[32,96,16,16,0], tuftsA:[64,96,16,16,0],
+    bushL:[16,112,16,16,3], plant:[48,112,16,16,0], tuftsB:[80,112,16,16,0],
+    // mushroom village sheet (6th value = 1)
+    mushO:[194,80,44,32,17,1], mushP:[194,112,44,32,17,1], mushR:[242,64,44,48,17,1], mushB:[242,112,44,32,17,1],
+    door:[225,49,14,15,0,1], potA:[238,21,16,26,0,1], potB:[254,21,16,26,0,1], potC:[270,21,16,26,0,1]
+  };
+  // [sprite, x (center), y (bottom)]
+  var LAYOUT = [
+    ["pine",24,66],["round",78,52],["tall",150,70],["pine",232,60],["round",200,118],["tall",44,142],
+    ["logA",100,86],["stump",176,100],["rockA",14,108],["rockC",142,152],["mushO",118,124],["mushB",208,172],["mushP",34,184],["mushR",200,84],["door",200,84.5],["potA",184,87],["potB",216,87],["potC",146,126],["bushD",66,98],
+    ["bushL",168,148],["bushD",96,172],["bushD",244,92],["rockA",70,160],["bushL",134,92],
+    ["pebbles",120,100],["fern",58,128],["fern",232,112],["plant",90,142],["plant",238,152],["tuftsA",40,90],
+    ["tuftsB",160,126],["tuftsB",60,60],["tuftsA",110,60],["tuftsB",12,150],["tuftsA",150,186],
+    ["tuftsB",244,184],["tuftsA",120,140],["fern",184,64]
+  ];
+
+  function rng(s) { return function () { s |= 0; s = s + 0x6D2B79F5 | 0; var t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function load(src) { return new Promise(function (res) { var i = new Image(); i.onload = function () { res(i); }; i.onerror = function () { res(i); }; i.src = src; }); }
+
+  var forest, village, sheets, grass = [], props = [], spots = [], gnomes = [], parts = [], ripples = [], flies = [];
+  var occupied = {}, hintId = -1, hintT = 0, t0 = 0, won = false;
+
+  Promise.all([load("assets/forest.png"), load("assets/village.png")].concat(NAMES.map(function (n) { return load("assets/" + n + ".png"); })))
+    .then(function (imgs) { forest = imgs[0]; village = imgs[1]; sheets = imgs.slice(2); setup(); });
+
+  function setup() {
+    var r = rng(7);
+    for (var gy = 0; gy < H / 16; gy++) { grass[gy] = []; for (var gx = 0; gx < W / 16; gx++) grass[gy][gx] = r() < .5 ? 0 : 1; }
+    LAYOUT.forEach(function (l, i) {
+      var d = S[l[0]]; props.push({ d: d, x: l[1], y: l[2] });
+      if (d[4]) { spots.push({ p: i, s: -1, x: l[1] - d[4], y: l[2] - 2, k: i + ":-1" });
+                  spots.push({ p: i, s: 1, x: l[1] + d[4], y: l[2] - 2, k: i + ":1" }); }
+    });
+    for (var f = 0; f < 9; f++) flies.push({ x: rand(10, W - 10), y: rand(30, H - 20), ph: rand(0, 6.3) });
+    buildSlots();
+    init();
+    document.getElementById("hint").onclick = hint;
+    document.getElementById("reset").onclick = function () { try { localStorage.removeItem(KEY); } catch (e) {} init(); };
+    document.getElementById("close").onclick = function () { document.getElementById("prize").classList.remove("show"); };
+    cv.addEventListener("pointerdown", click);
+    requestAnimationFrame(frame);
+  }
+
+  function saved() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; } }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(gnomes.filter(function (g) { return g.st === "found"; }).map(function (g) { return g.id; }))); } catch (e) {} }
+
+  function init() {
+    var done = saved(), usedProps = {}, order = spots.slice().sort(function () { return Math.random() - .5; });
+    occupied = {}; won = false; gnomes = []; parts = []; hintId = -1;
+    document.getElementById("prize").classList.remove("show");
+    NAMES.forEach(function (n, i) {
+      var g = { id: i, img: sheets[i], x: 0, y: 0, dir: 0, st: "hidden", t: rand(4, 9), lookT: rand(1, 3), walk: 0, moving: false, pop: 1, w: { pause: 0 } };
+      if (done.indexOf(i) !== -1) { g.st = "found"; g.x = rand(24, 232); g.y = rand(120, 184); }
+      else {
+        var sp = order.filter(function (s) { return !usedProps[s.p] && !occupied[s.k]; })[0];
+        usedProps[sp.p] = true; occupied[sp.k] = true; g.spot = sp; g.x = sp.x; g.y = sp.y;
+      }
+      gnomes.push(g);
+    });
+    updateHud();
+    if (done.length === gnomes.length) showPrize();
+  }
+
+  function buildSlots() {
+    var box = document.getElementById("slots");
+    NAMES.forEach(function (n, i) {
+      var c = document.createElement("canvas"); c.width = 24; c.height = 32; c.className = "slot";
+      c.getContext("2d").drawImage(sheets[i], 24, 0, 24, 32, 0, 0, 24, 32); box.appendChild(c);
+    });
+  }
+  function updateHud() {
+    var n = gnomes.filter(function (g) { return g.st === "found"; }).length;
+    document.getElementById("count").textContent = n + " / " + gnomes.length + " found";
+    var s = document.getElementById("slots").children;
+    gnomes.forEach(function (g, i) { s[i].classList.toggle("on", g.st === "found"); });
+    document.getElementById("hint").disabled = n === gnomes.length;
+  }
+  function showPrize() { document.getElementById("word").textContent = atob(CODE); document.getElementById("prize").classList.add("show"); document.getElementById("close").focus(); }
+
+  function click(e) {
+    var r = cv.getBoundingClientRect(), k = W / r.width, x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k, tol = 6 * k, hit = null;
+    gnomes.slice().sort(function (a, b) { return b.y - a.y; }).forEach(function (g) {
+      if (!hit && g.st !== "found" && Math.abs(x - g.x) <= 7 + tol && y <= g.y + tol && y >= g.y - 23 - tol) hit = g;
+    });
+    if (!hit) { ripples.push({ x: x, y: y, t: 0 }); return; }
+    hit.st = "found"; hit.pop = 0; hit.moving = false; hit.dir = 0; delete occupied[hit.spot && hit.spot.k];
+    for (var i = 0; i < 12; i++) parts.push({ x: hit.x, y: hit.y - 12, vx: rand(-40, 40), vy: rand(-60, -10), t: 0 });
+    if (hintId === hit.id) hintT = 0;
+    save(); updateHud();
+    if (gnomes.every(function (g) { return g.st === "found"; })) setTimeout(showPrize, 1500);
+  }
+
+  function hint() {
+    var pool = gnomes.filter(function (g) { return g.st !== "found"; });
+    if (!pool.length) return;
+    hintId = pool[Math.floor(Math.random() * pool.length)].id; hintT = 2.5;
+  }
+
+  function face(g, dx, dy) { g.dir = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 1 : 2) : (dy < 0 ? 3 : 0); }
+  function stepTo(g, tx, ty, sp, dt) {
+    var dx = tx - g.x, dy = ty - g.y, d = Math.hypot(dx, dy);
+    if (d < 1) { g.x = tx; g.y = ty; g.moving = false; return true; }
+    var m = Math.min(d, sp * dt); g.x += dx / d * m; g.y += dy / d * m; face(g, dx, dy); g.moving = true; g.walk += dt; return false;
+  }
+
+  function update(dt) {
+    gnomes.forEach(function (g) {
+      if (g.st === "hidden") {
+        g.t -= dt; g.lookT -= dt;
+        if (g.lookT <= 0) { g.dir = [0, 0, 1, 2][Math.floor(Math.random() * 4)]; g.lookT = rand(1.5, 4); }
+        if (g.t <= 0 && !calm) {
+          var free = spots.filter(function (s) { return !occupied[s.k]; });
+          g.next = free[Math.floor(Math.random() * free.length)];
+          delete occupied[g.spot.k]; occupied[g.next.k] = true; g.st = "sneak";
+        }
+      } else if (g.st === "sneak") {
+        if (stepTo(g, g.next.x, g.next.y, 24, dt)) { g.spot = g.next; g.st = "hidden"; g.t = rand(6, 14); g.dir = 0; }
+      } else if (g.pop < .7) {
+        g.pop += dt;
+      } else if (!calm) {
+        var w = g.w;
+        if (w.pause > 0) { w.pause -= dt; g.moving = false; }
+        else if (!w.tx) { w.tx = rand(16, 240); w.ty = rand(112, 186); }
+        else if (stepTo(g, w.tx, w.ty, 16, dt)) { w.tx = 0; w.pause = rand(1, 3.5); }
+      }
+    });
+    parts.forEach(function (p) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 90 * dt; });
+    parts = parts.filter(function (p) { return p.t < .9; });
+    ripples.forEach(function (r) { r.t += dt; }); ripples = ripples.filter(function (r) { return r.t < .4; });
+    if (hintT > 0) hintT -= dt;
+  }
+
+  function drawGnome(g, now) {
+    var f = g.moving ? [1, 0, 1, 2][Math.floor(g.walk * 6) % 4] : 1, jump = 0;
+    if (g.st === "found" && g.pop < .7) jump = Math.abs(Math.sin(g.pop / .7 * Math.PI * 2)) * 12 * (1 - g.pop / .7);
+    ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.fillRect(Math.round(g.x - 5), Math.round(g.y - 1), 10, 2);
+    ctx.drawImage(g.img, f * 24, g.dir * 32, 24, 32, Math.round(g.x - 12), Math.round(g.y - 32 - jump), 24, 32);
+  }
+
+  function frame(ts) {
+    var now = ts / 1000, dt = Math.min(.05, t0 ? now - t0 : 0); t0 = now;
+    update(dt);
+    for (var gy = 0; gy < grass.length; gy++) for (var gx = 0; gx < grass[gy].length; gx++)
+      ctx.drawImage(forest, grass[gy][gx] ? 16 : 0, grass[gy][gx] ? 16 : 0, 16, 16, gx * 16, gy * 16, 16, 16);
+    var ents = props.map(function (p) { return { y: p.y, p: p }; })
+      .concat(gnomes.map(function (g) { return { y: g.st === "found" ? g.y + 1000 : g.y, g: g }; }))
+      .sort(function (a, b) { return a.y - b.y; });
+    ents.forEach(function (e) {
+      if (e.p) { var d = e.p.d; ctx.drawImage(d[5] ? village : forest, d[0], d[1], d[2], d[3], Math.round(e.p.x - d[2] / 2), e.p.y - d[3], d[2], d[3]); }
+      else drawGnome(e.g, now);
+    });
+    if (!calm) flies.forEach(function (f) {
+      ctx.globalAlpha = .4 + .6 * Math.max(0, Math.sin(now * 2 + f.ph)); ctx.fillStyle = "#f6e58d";
+      ctx.fillRect(Math.round(f.x + Math.sin(now * .4 + f.ph) * 8), Math.round(f.y + Math.cos(now * .3 + f.ph) * 5), 1, 1);
+    });
+    ctx.globalAlpha = 1;
+    parts.forEach(function (p) { ctx.globalAlpha = 1 - p.t / .9; ctx.fillStyle = "#f2c14e"; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 2); });
+    ripples.forEach(function (r) { ctx.globalAlpha = .6 * (1 - r.t / .4); ctx.strokeStyle = "#e4efe0"; ctx.beginPath(); ctx.arc(r.x, r.y, 2 + r.t * 24, 0, 6.3); ctx.stroke(); });
+    ctx.globalAlpha = 1;
+    if (hintT > 0) {
+      var h = gnomes[hintId]; ctx.strokeStyle = "#f2c14e"; ctx.lineWidth = 1.5; ctx.beginPath();
+      ctx.arc(h.x, h.y - 11, 15 + Math.sin(now * 8) * 2, 0, 6.3); ctx.stroke(); ctx.lineWidth = 1;
+    }
+    requestAnimationFrame(frame);
+  }
+})();
+</script>
+</body>
+</html>
